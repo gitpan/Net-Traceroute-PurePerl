@@ -1,0 +1,6 @@
+Revision history for Perl extension Net::Traceroute::PurePerl.
+
+0.01  Thu Oct 24 11:57:07 2002
+	- original version; created by h2xs 1.21 with options
+		-X -n Net::Traceroute::PurePerl
+

@@ -1,0 +1,88 @@
+Net/Traceroute/PurePerl version 0.01
+==================================
+
+Net::Traceroute:PurePerl - traceroute(1) functionality in perl via raw sockets
+
+SYNOPSIS
+
+    use Net::Traceroute::PurePerl;
+
+    my $t = new Net::Traceroute::PurePerl(
+				backend => 'PurePerl', # this optional
+				host    => 'www.openreach.com',
+				debug   => 0,
+				max_ttl => 12,
+				timeout => 2,
+				packetlen => 40,
+				use_alarm => 1,
+				);
+    $t->traceroute;
+    $t->pretty_print;
+
+
+DESCRIPTION
+
+This module implements traceroute(1) functionality for perl5.  
+It allows you to trace the path IP packets take to a destination.  
+It is implemented by using raw sockets to act just like the regular traceroute.
+You must have Net::RawIP installed. 
+You must also be root to use the raw sockets.
+
+OVERVIEW
+
+A new Net::Traceroute::PurePerl object must be created with the I<new> method.
+This will not perform the traceroute immediately, unlike Net::Traceroute.
+It will return a "template" object that can be used to set parameters for several subsequent traceroutes.
+
+Methods are available for accessing information about a given
+traceroute attempt.  There are also methods that view/modify the
+options that are passed to the object's constructor.
+
+To trace a route, UDP packets are sent with a small TTL (time-to-live)
+field in an attempt to get intervening routers to generate ICMP
+TIME_EXCEEDED messages.
+
+CONSTRUCTOR AND CLONING
+
+    $obj = Net::Traceroute::PurePerl->new([base_port	=> $base_port,]
+				[debug		=> $debuglvl,]
+				[max_ttl	=> $max_ttl,]
+				[host		=> $host,]
+				[queries	=> $queries,]
+				[query_timeout	=> $query_timeout,]
+				[timeout	=> $timeout,]
+				[source_address	=> $srcaddr,]
+				[packetlen	=> $packetlen,]
+				[trace_program	=> $program,]
+				[no_fragment	=> $nofrag,]);
+				[use_alarm	=> $use_alarm,]);
+    $frob = $obj->clone([options]);
+
+
+INSTALLATION
+
+To install this module type the following:
+
+   perl Makefile.PL
+   make
+   make test
+   make install
+
+DEPENDENCIES
+
+This module requires these other modules and libraries:
+
+	Net::RawIP	v 0.09 or better
+	Net::Traceroute v 1.05 or better
+
+AUTHOR
+
+Tom Scanlan <tscanlan@openreach.com> owner Net::Traceroute::PurePerl
+Daniel Hagerty <hag@ai.mit.edu> owner of Net::Traceroute and input on this fella
+
+
+COPYRIGHT AND LICENCE
+
+Go right ahead and copy it.  2002 Tom Scanlan.
+Don't blame me for damages, just the bugs.
+
