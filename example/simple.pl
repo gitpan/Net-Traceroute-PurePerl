@@ -4,11 +4,15 @@ use strict;
 use Net::Traceroute::PurePerl;
 use Data::Dumper;
 
+my $host = $ARGV[0] || 'www.perl.org';
+
 my $t = new Net::Traceroute::PurePerl(
-			    host    => 'www.openreach.com',
-			    debug   => 0,
-			    max_ttl => 12,
-			    timeout => 2,
+			    host             => $host,
+			    debug            => 0,
+			    max_ttl          => 20,
+			    timeout          => 2,
+             protocol         => 'icmp',
+             concurrent_hops  => 6,
 			    );
 
 $t->traceroute;

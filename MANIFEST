@@ -3,5 +3,7 @@ Makefile.PL
 MANIFEST
 PurePerl.pm
 README
-test.pl
+t/01_trace.t
 example/simple.pl
+example/traceroute.pl
+META.yml                                 Module meta-data (added by MakeMaker)

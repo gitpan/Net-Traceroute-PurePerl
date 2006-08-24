@@ -1,266 +1,740 @@
 package Net::Traceroute::PurePerl;
 
-use vars qw(@ISA $VERSION $AUTOLOAD %net_traceroute_native_var);
+use vars qw(@ISA $VERSION $AUTOLOAD %net_traceroute_native_var %protocols);
 use strict;
 use warnings;
 use Net::Traceroute;
-use Net::RawIP qw(:pcap);
 use Socket;
+use Carp qw(carp croak);
+use FileHandle;
+use Time::HiRes qw(time);
 
 @ISA = qw(Net::Traceroute);
-$VERSION = '0.02';
+$VERSION = '0.10_01';
 
-# used if we need to use alarm for pcap timeout
-$SIG{ALRM} = sub { die "timeout" };
+use constant SO_BINDTODEVICE        => 25;   # from asm/socket.h
+use constant IPPROTO_IP             => 0;    # from netinet/in.h
 
-my @icmp_unreach_code = (		TRACEROUTE_UNREACH_NET,
+# Windows winsock2 uses 4 for IP_TTL instead of 2
+use constant IP_TTL                 => ($^O eq "MSWin32") ? 4 : 2;
+
+use constant IP_HEADERS             => 20;   # Length of IP headers
+use constant ICMP_HEADERS           => 8;    # Length of ICMP headers
+use constant UDP_HEADERS            => 8;    # Length of UDP headers
+
+use constant IP_PROTOCOL            => 9;    # Position of protocol number
+
+use constant UDP_DATA               => IP_HEADERS + UDP_HEADERS;
+use constant ICMP_DATA              => IP_HEADERS + ICMP_HEADERS;
+
+use constant UDP_SPORT              => IP_HEADERS + 0; # Position of sport
+use constant UDP_DPORT              => IP_HEADERS + 2; # Position of dport
+
+use constant ICMP_TYPE              => IP_HEADERS + 0; # Position of type
+use constant ICMP_CODE              => IP_HEADERS + 2; # Position of code
+use constant ICMP_ID                => IP_HEADERS + 4; # Position of ID
+use constant ICMP_SEQ               => IP_HEADERS + 6; # Position of seq
+
+use constant ICMP_PORT              => 0;    # ICMP has no port
+
+use constant ICMP_TYPE_TIMEEXCEED   => 11;   # ICMP Type
+use constant ICMP_TYPE_ECHO         => 8;    # ICMP Type
+use constant ICMP_TYPE_UNREACHABLE  => 3;    # ICMP Type
+use constant ICMP_TYPE_ECHOREPLY    => 0;    # ICMP Type
+
+use constant ICMP_CODE_ECHO         => 0;    # ICMP Echo has no code
+
+BEGIN
+{
+   if ($^O eq "MSWin32" and $^V eq v5.8.6)
+   {
+      $ENV{PERL_ALLOW_NON_IFS_LSP} = 1;
+   }
+}
+
+%protocols = 
+(
+               'icmp'      => 1,
+               'udp'       => 1,
+);
+
+my @icmp_unreach_code = 
+(		
+               TRACEROUTE_UNREACH_NET,
 					TRACEROUTE_UNREACH_HOST,
 					TRACEROUTE_UNREACH_PROTO,
 					0,
 					TRACEROUTE_UNREACH_NEEDFRAG,
-					TRACEROUTE_UNREACH_SRCFAIL, );
+					TRACEROUTE_UNREACH_SRCFAIL, 
+);
 
 # set up allowed autoload attributes we need
-my @net_traceroute_native_vars = qw(use_alarm);
-for my $attr ( @net_traceroute_native_vars ) { $net_traceroute_native_var{$attr}++; } 
+my @net_traceroute_native_vars = qw(use_alarm concurrent_hops
+      protocol first_hop device);
 
-sub AUTOLOAD {
-    my $self = shift;
-    my $attr = $AUTOLOAD;
-    $attr =~ s/.*:://;
-    return unless $attr =~ /[^A-Z]/;  # skip DESTROY and all-cap methods
-    warn "invalid attribute method: ->$attr()" unless $net_traceroute_native_var{$attr};
-    $self->{$attr} = shift if @_;
-    return $self->{$attr};
+for my $attr ( @net_traceroute_native_vars )
+{
+   $net_traceroute_native_var{$attr}++; 
 }
 
-sub new {
-    my $self = shift;
-    my $type = ref($self) || $self;
-    my %arg = @_;
-
-    $self = bless {}, $type;
-
-    # keep a loop from happening when calling super::new
-    my $backend = delete $arg{'backend'};
-
-    # used to get around the real traceroute running the trace
-    my $host = delete $arg{'host'};
-
-    # call the real traceroute new
-    $self->init(%arg);
-
-    # put our host back in
-    $self->host($host)		if (defined $host);
-    $self->max_ttl(30)		unless (defined $self->max_ttl); 
-    $self->queries(3)		unless (defined $self->queries); 
-    $self->base_port(33434)	unless (defined $self->base_port); 
-    $self->query_timeout(5)		unless (defined $self->query_timeout); 
-    $self->packetlen(40)		unless (defined $self->packetlen); 
-
-    # 1 if we are seeming to hang on the call to pcap next
-    # 0 if you are fine with out
-    $self->use_alarm(1)		unless (defined $self->use_alarm); 
-
-    return $self;
+sub AUTOLOAD 
+{
+   my $self = shift;
+   my $attr = $AUTOLOAD;
+   $attr =~ s/.*:://;
+   return unless $attr =~ /[^A-Z]/;  # skip DESTROY and all-cap methods
+   carp "invalid attribute method: ->$attr()" 
+      unless $net_traceroute_native_var{$attr};
+   $self->{$attr} = shift if @_;
+   return $self->{$attr};
 }
-sub pretty_print {
-    my $self = shift;
 
-    print "traceroute to (" . $self->host . ") , ". $self->max_ttl ." hops max, "
-	    . $self->packetlen ." byte packets\n";
+sub new 
+{
+   my $self = shift;
+   my $type = ref($self) || $self;
+   my %arg = @_;
 
-    for (my $hop=1; $hop <= $self->hops; $hop++) {
-	print "$hop)\t" . ( $self->hop_query_host($hop,0) || "???" ) . "\t";
+   $self = bless {}, $type;
 
-	for (my $query=1; $query <= $self->hop_queries($hop); $query++) {
-	    print $self->hop_query_time($hop, $query). " ms\t";
+   # keep a loop from happening when calling super::new
+   my $backend = delete $arg{'backend'};
 
-	}
+   # used to get around the real traceroute running the trace
+   my $host = delete $arg{'host'};
 
-	print $self->hop_query_stat($hop) ."\n";
+   # Old method to use ICMP for traceroutes, using `protocol' is preferred
+   my $useicmp = delete $arg{'useicmp'};
+
+   # call the real traceroute new
+   $self->init(%arg);
+
+   # Set protocol to ICMP if useicmp was set;
+   if ($useicmp)
+   {
+      carp ("Protocol already set, useicmp is overriding")
+         if (defined $self->protocol  and $self->protocol ne "icmp");
+      $self->protocol('icmp') if ($useicmp);
    }
 
+   # put our host back in
+   $self->host($host)	      if (defined $host);
+   $self->max_ttl(30)		   unless (defined $self->max_ttl); 
+   $self->queries(3)		      unless (defined $self->queries);
+   $self->base_port(33434)	   unless (defined $self->base_port); 
+   $self->query_timeout(5)	   unless (defined $self->query_timeout); 
+   $self->packetlen(40)		   unless (defined $self->packetlen); 
+   $self->first_hop(1)        unless (defined $self->first_hop);
+   $self->concurrent_hops(6)  unless (defined $self->concurrent_hops);
+   
+   # UDP is the UNIX default for traceroute
+   $self->protocol('udp')  unless (defined $self->protocol);
+
+   # Depreciated: we no longer use libpcap, so the alarm is no longer
+   # required. Kept for backwards compatibility but not used.
+   $self->use_alarm(0)		unless (defined $self->use_alarm); 
+
+   $self->_validate();
+   
+   return $self;
 }
 
-sub traceroute {
-    my $self = shift;
+sub init
+{
+   my $self = shift;
+   my %arg  = @_;
 
-    $self->debug_print(1, "Performing traceroute\n");
-    warn "No host provided!" && return undef unless (defined $self->host);
+   foreach my $var (@net_traceroute_native_vars)
+   {
+      if(defined($arg{$var})) {
+         $self->$var($arg{$var});
+      }
+   }
+
+   $self->SUPER::init(@_);
+}
+
+sub pretty_print 
+{
+   my $self = shift;
+
+   print "traceroute to " . $self->host;
+   print " (" . inet_ntoa($self->{'_destination'}) . "), ";
+   print  $self->max_ttl . " hops max, " . $self->packetlen ." byte packets\n";
+
+   my $lasthop = $self->first_hop + $self->hops - 1;
+   
+   for (my $hop=$self->first_hop; $hop <= $lasthop; $hop++)
+   {
+      my $lasthost = '';
+
+	   printf '%2s ', $hop;
+
+      if (not $self->hop_queries($hop))
+      {
+         print "error: no responses\n";
+         next;
+      }
+
+      for (my $query=1; $query <= $self->hop_queries($hop); $query++) {
+         my $host = $self->hop_query_host($hop,$query);
+         if ($host and ( not $lasthost or $host ne $lasthost ))
+         {
+            printf "\n%2s ", $hop if ($lasthost and $host ne $lasthost);
+            printf '%-15s ', $host;
+            $lasthost = $host;
+         }
+         my $time = $self->hop_query_time($hop, $query);
+         if (defined $time and $time > 0)
+         {
+            printf '%7s ms ', $time;
+         }
+         else
+         {
+            print "* ";
+         }
+	   }
+
+      print "\n";
+   }
+
+   return;
+}
+
+sub traceroute 
+{
+   my $self = shift;
+
+   $self->_validate();
+
+   $self->debug_print(1, "Performing traceroute\n");
+   carp "No host provided!" && return undef unless (defined $self->host);
+
+   {
+      my $destination = inet_aton($self->host);
+      
+      croak "Could not resolve host " . $self->host 
+         unless (defined $destination);
+
+      $self->{_destination} = $destination;
+   }
     
-    # release any old hop structure
-    $self->_zero_hops();
+   # release any old hop structure
+   $self->_zero_hops();
 
-    # what device do we use to get to host, and it's address
-    my $device = rdev($self->host);
-    my $device_addr = ${ifaddrlist()}{$device};
-    $self->source_address( $device_addr ) unless (defined $self->source_address);
+   # Create the ICMP socket, used to send ICMP messages and receive ICMP errors
+   # Under windows, the ICMP socket doesn't get the ICMP errors unless the
+   # sending socket was ICMP, or the interface is in promiscuous mode, which 
+   # is why ICMP is the only supported protocol under windows.
+   my $icmpsocket = FileHandle->new();
 
-    # this is the packet we will send out
-    my $packet = new Net::RawIP({udp=>{}});
+   socket($icmpsocket, PF_INET, SOCK_RAW, getprotobyname('icmp')) ||
+      croak("ICMP Socket error - $!");
 
-    # these are reference packets
-    my $icmp = new Net::RawIP({icmp=>{}});			  
-    my $udp  = new Net::RawIP({udp=>{}});  
+   $self->debug_print(2, "Created ICMP socket to receive errors\n");
 
-    # listen for incoming icmp dest unreachable and time exceeded messages
-    my $filter="ip proto \\icmp and dst host ". $self->source_address . " and (icmp[0]==3 or icmp[0]==11)";
-    my $pcap = $packet->pcapinit($device,$filter,1500,$self->query_timeout);
+   $self->{'_icmp_socket'}    = $icmpsocket;
+   $self->{'_trace_socket'}   = $self->_create_tracert_socket();
 
-    # this is how far into a binary packet we need to look to get
-    # past the Ethernet header
-    my $offset = linkoffset($pcap);
+   my $success = $self->_run_traceroute();
 
-    my ($last_reply_addr, $last_icmp_type, $last_icmp_code) = (0,0,0);
-
-    my ($reply_addr, $icmp_type, $icmp_code, $icmp_data) = (0,0,0,0);
-    my ($end) = (0);
-  
-    my ($start_time, $end_time, $done_time) = (0,0,0);
-
-    my $data = "a" x ($self->packetlen - 28);
-
-    # set up our packet
-    $packet->set({ ip => {saddr=>$self->source_address, daddr=>$self->host, frag_off=>0, tos=>0, id=>$$},
-		   udp=> {data=>$data}	});
-
-    # for ecah hop
-    for (my $hop=1;  $hop <= $self->max_ttl;	$hop++){
-	$self->debug_print(1, "Starting hop $hop\n");
-
-	# for each query on this hop
-	for (my $query=1;   $query <= $self->queries;	$query++ ){
-	    $self->debug_print(1, "Starting query $query for hop $hop\n");
-
-	    # increment ports as we go
-	    my $port = $self->base_port + $hop;
-
-	    # set our new ports and keep up with the ttls
-	    $packet->set( { ip => { ttl => $hop }, udp =>{ source => $port, dest => $port }   } ); 
-
-	    # thar she goes!
-	    $packet->send();
-
-	    # now start the timer
-	    $start_time = $end_time = timem();
-
-	    my $answer = 0;
-
-	    while ( (($end_time-$start_time) < $self->query_timeout) && ! $answer) {
-	        $self->debug_print(5, "still no answer. checked time: " . ($end_time-$start_time) ."\n");
-
-		my $h;
-
-		# end this nightmare if we got dest unreachable messages last time
-		$end = 1 if($last_icmp_type==3);
-
-		$last_reply_addr=$last_icmp_type=$last_icmp_code=0;
-
-		# this will hold our reply from the network... if there is one
-		my $answer_packet;
-
-		# if we have problems with pcap not timing out
-		if ($self->use_alarm) {
-
-		    # wait for a return packet not longer than timeout seconds.
-		    eval {
-		        alarm($self->query_timeout);
-		        $answer_packet = &next($pcap, $h);
-		        alarm(0);
-		    };
-
-		    # if we got a SIGALRM
-		    if ($@) {
-
-			# and it was due to a timeout, 
-		        if ($@ =~ /timeout/) {
-			    # no biggie here, this happens
-			    $self->debug_print(1, "call to pcap next timed out\n");
-		        } else {
-			    # there was some other strange error
-			    alarm(0);           # clear the still-pending alarm
-			    $self->debug_print(1, "strnage error while waiting on pcap call: $@\n");
-		        }
-		    }
-
-		} else {
-		    # if pcap times out just right for you
-		    $answer_packet = &next($pcap, $h);
-		}
-
-		# we have our answer or a time out, so stop the clock
-		$end_time = timem();
-
-		# if we got a real network reply
-		if (defined $answer_packet) {
-
-		    # set our icmp packet to the reply
-		    $icmp->bset(substr($answer_packet, $offset));
-
-		    # get data from it
-		    ($reply_addr, $icmp_type, $icmp_code, $icmp_data) 
-			    = $icmp->get({ip=>['saddr'],icmp=>['type','code','data']});    
-
-		    # the data of the icmp packet is our original packet
-		    #   here we are just verifying that we got the right reply
-		    $udp->bset($icmp_data);
-		    my ($reply_sport) = $udp->get({udp=>['source']});
-		    
-		    if($reply_sport eq $port){   
-			$answer = 1;
-			
-			# save the reply for next round
-			($last_reply_addr, $last_icmp_type, $last_icmp_code) 
-			    = ($reply_addr, $icmp_type, $icmp_code);
-		    }
-		}
-	    }
-	
-	    $done_time = ($end_time-$start_time);
-
-	    # if we timed out
-	    if ( ($end_time - $start_time) > $self->query_timeout ){
-	        $self->_add_hop_query($hop, $query , TRACEROUTE_TIMEOUT, addr2name($last_reply_addr), 0 );
-
-	    # if we got a dest unreachable, set the codes
-	    } elsif ( ! dest_unreachable($last_icmp_type, $last_icmp_code) ) {
-		$self->_add_hop_query($hop, $query , $icmp_unreach_code[$icmp_code], 
-				    addr2name($last_reply_addr), 0 );
-
-	    # else everything was good
-	    } else {
-		$self->_add_hop_query($hop, $query , TRACEROUTE_OK, 
-				    addr2name($last_reply_addr), rtt_time($done_time) );
-	    }
-	}
-    }
-	return if $end;
-}
-
-
-# convert the addr returned by RawIP into human readable ip
-sub addr2dot {
-  sprintf("%u.%u.%u.%u",unpack "C4", pack "N1", shift);
+   return $success;
 }
 
 # convert the addr returned by RawIP into human readable name or ip
-sub addr2name {
-    my $addr = shift;
-    my $name  = (gethostbyaddr( pack("N",$addr), AF_INET) )[0] || addr2dot($addr);
-    return $name;
+sub addr2name 
+{
+   my $addr = shift;
+   my $name  = (gethostbyaddr( pack("N",$addr), AF_INET) )[0] || addr2dot($addr);
+   return $name;
 }
 
-sub rtt_time {
-    my $ms = shift;
-    return sprintf("%.2f", 1000 * $ms);
+sub rtt_time 
+{
+   my $ms = shift;
+   return sprintf("%.2f", 1000 * $ms);
 }
 
-sub dest_unreachable { 
-    my $type = shift;
-    my $code = shift;
+sub dest_unreachable 
+{ 
+   my $type = shift;
+   my $code = shift;
 
-    return ( $type != 3 || ($type == 3 && $code == 3) );
+   return ( $type != 3 || ($type == 3 && $code == 3) );
+}
+
+
+# Private functions
+
+sub _validate
+{
+   my $self = shift;
+
+   # Normalize values;
+
+   $self->protocol(           lc $self->protocol);
+
+   $self->max_ttl(            sprintf('%i',$self->max_ttl));
+   $self->queries(            sprintf('%i',$self->queries));
+   $self->base_port(          sprintf('%i',$self->base_port));
+   $self->query_timeout(      sprintf('%i',$self->query_timeout));
+   $self->packetlen(          sprintf('%i',$self->packetlen));
+   $self->first_hop(          sprintf('%i',$self->first_hop));
+   $self->concurrent_hops(    sprintf('%i',$self->concurrent_hops));
+
+   # Check to see if values are sane
+
+   croak "Parameter `protocol' value is not supported : " . $self->protocol 
+      if (not exists $protocols{$self->protocol});
+
+   croak "Parameter `first_hop' must be an integer between 1 and 255"
+      if ($self->first_hop < 1 or $self->first_hop > 255);
+
+   croak "Parameter `max_ttl' must be an integer between 1 and 255"
+      if ($self->max_ttl < 1 or $self->max_ttl > 255);
+
+   croak "Parameter `base_port' must be an integer between 1 and 65280"
+      if ($self->base_port < 1 or $self->base_port > 65280);
+
+   croak "Parameter `packetlen' must be an integer between 40 and 1492"
+      if ($self->packetlen < 40 or $self->packetlen > 1492);
+
+   croak "Parameter `first_hop' must be less than or equal to `max_ttl'"
+      if ($self->first_hop > $self->max_ttl);
+
+   croak "parameter `queries' must be an interger between 1 and 255"
+      if ($self->queries < 1 or $self->queries > 255);
+   
+   croak "parameter `concurrent_hops' must be an interger between 1 and 255"
+      if ($self->concurrent_hops < 1 or $self->concurrent_hops > 255);
+
+   return;
+}
+
+sub _run_traceroute
+{
+   my $self = shift;
+
+   my (  $end,
+         $endhop,
+         $stop,
+         $sentpackets,
+         $currenthop,
+         $currentquery,
+         $nexttimeout,
+         $timeout,
+         $rbits,
+         $nfound,
+         %packets,
+         %pktids,
+      );
+
+   $stop = $end = $endhop = $sentpackets = 0;
+
+   %packets = ();
+   %pktids  = ();
+
+   $currenthop    = $self->first_hop;
+   $currentquery  = 0;
+
+   $rbits   = "";
+   vec($rbits,$self->{'_icmp_socket'}->fileno(), 1) = 1;
+
+   while (not $stop)
+   {
+      while (scalar keys %packets < $self->concurrent_hops and 
+            $currenthop <= $self->max_ttl and
+            not select((my $rout = $rbits),undef,undef,0))
+      {
+         $sentpackets++;
+         $self->debug_print(1,"Sending packet $currenthop $currentquery\n");
+         my $start_time = $self->_send_packet($currenthop,$currentquery);
+         my $id         = $self->{'_last_id'};
+         my $localport  = $self->{'_local_port'};
+
+         $packets{$sentpackets} =  
+         {
+               'id'        => $id,
+               'hop'       => $currenthop,
+               'query'     => $currentquery,
+               'localport' => $localport,
+               'starttime' => $start_time,
+               'timeout'   => $start_time+$self->query_timeout,
+         };
+
+         $pktids{$id} = $sentpackets;
+
+         $nexttimeout = $packets{$sentpackets}{'timeout'} 
+            unless ($nexttimeout);
+
+         $currentquery = ($currentquery + 1) % $self->queries;
+         if ($currentquery == 0)
+         {
+            $currenthop++;
+         }
+      }
+      $timeout = 0;
+      if (keys %packets == $self->concurrent_hops)
+      {
+         $timeout = $nexttimeout - time;
+         $timeout = .01 if ($timeout > .1);
+      }
+      $nfound  = select((my $rout = $rbits),undef,undef,$timeout);
+      while ($nfound and keys %packets)
+      {
+         my (  $recv_msg,
+               $from_saddr,
+               $from_port,
+               $from_ip,
+               $from_id,
+               $from_proto,
+               $from_type,
+               $from_code,
+               $icmp_data,
+               $local_port,
+               $end_time,
+               $last_hop,
+            );
+
+         $end_time   = time;
+
+         $from_saddr = recv($self->{'_icmp_socket'},$recv_msg,1500,0);
+         if (defined $from_saddr)
+         {
+            ($from_port,$from_ip)   = sockaddr_in($from_saddr);
+            $from_ip                = inet_ntoa($from_ip);
+            $self->debug_print(1,"Received packet from $from_ip\n");
+         }
+         else
+         {
+            $self->debug_print(1,"No packet?\n");
+            $nfound = 0;
+            last;
+         }
+
+         $from_proto = unpack('C',substr($recv_msg,IP_PROTOCOL,1));
+
+         if ($from_proto != getprotobyname('icmp'))
+         {
+            my $protoname = getprotobynumber($from_proto);
+            $self->debug_print(1,"Packet not ICMP $from_proto($protoname)\n");
+            last;
+         }
+
+         ($from_type,$from_code) = unpack('CC',substr($recv_msg,ICMP_TYPE,2));
+         $icmp_data              = substr($recv_msg,ICMP_DATA);
+
+         if (not $icmp_data)
+         {
+            $self->debug_print(1,
+                  "No data in packet ($from_type,$from_code)\n");
+            last;
+         }
+
+         if (  $from_type == ICMP_TYPE_TIMEEXCEED or
+               $from_type == ICMP_TYPE_UNREACHABLE or
+               ($self->protocol eq "icmp" and 
+                  $from_type == ICMP_TYPE_ECHOREPLY) )
+         {
+
+            if ($self->protocol eq 'udp')
+            {
+               $local_port    = unpack('n',substr($icmp_data,UDP_SPORT,2));
+               $from_id       = unpack('n',substr($icmp_data,UDP_DPORT,2));
+
+               $last_hop      = ($from_type == ICMP_TYPE_UNREACHABLE) ? 1 : 0;
+            }
+            elsif ($self->protocol eq 'icmp')
+            {
+               if ($from_type == ICMP_TYPE_ECHOREPLY)
+               {
+                  my $icmp_id = unpack('n',substr($recv_msg,ICMP_ID,2));
+                  last unless ($icmp_id == $$);
+
+                  my $seq     = unpack('n',substr($recv_msg,ICMP_SEQ,2));
+                  $from_id    = $seq; # Reusing the same variable name
+                  $last_hop   = 1;;
+
+                  $self->debug_print(1,"Got echo reply\n");
+               }
+               else
+               {
+                  my $icmp_id = unpack('n',substr($icmp_data,ICMP_ID,2));
+                  return unless ($icmp_id == $$);
+
+                  my $ptype   = unpack('C',substr($icmp_data,ICMP_TYPE,1));
+                  my $pseq    = unpack('n',substr($icmp_data,ICMP_SEQ,2));
+                  if ($ptype eq ICMP_TYPE_ECHO)
+                  {
+                     $from_id = $pseq; # Reusing the variable
+                  }
+               }
+            }
+         }
+
+         if ($from_ip and $from_id)
+         {
+            my $id = $pktids{$from_id};
+            if ($packets{$id}{'id'} == $from_id)
+            {
+               last if ($self->protocol eq 'udp' and 
+                     $packets{$id}{'localport'} != $local_port);
+
+               my $total_time = $end_time - $packets{$id}{'starttime'};
+               my $hop        = $packets{$id}{'hop'};
+               my $query      = $packets{$id}{'query'};
+
+               if (not $endhop or $hop <= $endhop)
+               {
+
+                  if ($last_hop)
+                  {
+                     $end++;
+                     $endhop = $hop;
+                  }
+
+                  $self->debug_print(1,"Recieved response for $hop $query\n");
+                  $self->_add_hop_query($hop, $query+1, TRACEROUTE_OK, 
+                        $from_ip, rtt_time($total_time) );
+               }
+               delete $packets{$id};
+            }
+         }
+         $nfound  = select((my $rout = $rbits),undef,undef,0);
+      }
+      if (keys %packets and $nexttimeout < time)
+      {
+         undef $nexttimeout;
+         
+         foreach my $id (sort keys %packets)
+         {
+            if ($packets{$id}{'timeout'} < time)
+            {
+               my $hop        = $packets{$id}{'hop'};
+               my $query      = $packets{$id}{'query'};
+
+               if ($endhop and $hop == $endhop)
+               {
+                  $end++;
+               }
+               elsif ($endhop and $hop > $endhop)
+               {
+                  delete $packets{$id};
+                  next;
+               }
+
+               $self->debug_print(1,"Timeout for $hop $query\n");
+	            $self->_add_hop_query($hop, $query+1, TRACEROUTE_TIMEOUT, 
+                     "", 0 );
+               
+               delete $packets{$id};
+            }
+            elsif (not defined $nexttimeout)
+            {
+               $nexttimeout = $packets{$id}{'timeout'};
+               last;
+            }
+         }
+      }
+
+      # Check if it is time to stop the looping
+      if ($currenthop > $self->max_ttl and not keys %packets)
+      {
+         $self->debug_print(1,"No more packets, last hop\n");
+         $stop = 1;
+      }
+      elsif ($end == $self->queries)
+      {
+         $self->debug_print(1,"Reached last hop\n");
+         $end  = 1;
+         $stop = 1;
+      }
+
+      # Looping
+   }
+
+   return $end;
+}
+
+# _create_tracert_socket reuses the ICMP socket already created for
+# icmp traceroutes, or creates a new socket. It then binds the socket
+# to the user defined devices and source address if provided and returns
+# the created socket.
+
+sub _create_tracert_socket
+{
+   my $self = shift;
+   my $socket;
+   
+   if ($self->protocol eq "icmp")
+   {
+      $socket = $self->{'_icmp_socket'};
+   }
+   elsif ($self->protocol eq "udp")
+   {
+      $socket     = FileHandle->new();
+      
+      socket($socket, PF_INET, SOCK_DGRAM, getprotobyname('udp')) or
+         croak "UDP Socket creation error - $!";
+
+      $self->debug_print(2,"Created UDP socket");
+   }
+
+   if ($self->device)
+   {
+      setsockopt($socket, SOL_SOCKET, SO_BINDTODEVICE(), 
+         pack('Z*', $self->device)) or 
+            croak "error binding to ". $self->device ." - $!";
+
+      $self->debug_print(2,"Bound socket to " . $self->device . "\n");
+   }
+
+   if ($self->source_address and $self->source_address ne '0.0.0.0')
+   {
+      $self->_bind($socket);
+   }
+
+   return $socket;
+}
+
+# _bind binds a sockets to a local source address so all packets originate
+# from that IP.
+
+sub _bind
+{
+   my $self    = shift;
+   my $socket  = shift;
+
+   my $ip = inet_aton($self->source_address);
+
+   croak "Nonexistant local address ". $self->source_address 
+      unless (defined $ip);
+
+   CORE::bind($socket, sockaddr_in(0,$ip)) or
+      croak "Error binding to ".$self->source_address.", $!";
+
+   $self->debug_print(2,"Bound socket to " . $self->source_address . "\n");
+
+   return;
+}
+
+sub _send_packet
+{
+   my $self          = shift;
+   my ($hop,$query)  = @_;
+
+   if ($self->protocol eq "icmp")
+   {
+      my $seq = ($hop-1) * $self->queries + $query + 1;
+      $self->_send_icmp_packet($seq,$hop);
+      $self->{'_last_id'} = $seq;
+   }
+   elsif ($self->protocol eq "udp")
+   {
+      my $dport = $self->base_port + ($hop-1) * $self->queries + $query;
+      $self->_send_udp_packet($dport,$hop);
+      $self->{'_last_id'} = $dport;
+   }
+
+   return time;
+}
+
+sub _send_icmp_packet
+{
+   my $self             = shift;
+   my ($seq,$hop)       = @_;
+   
+   my $saddr            = $self->_connect(ICMP_PORT,$hop);
+   my $data             = 'a' x ($self->packetlen - ICMP_DATA);
+
+   my ($pkt, $chksum)   = (0,0);
+
+   # Create packet twice, once without checksum, once with it
+   foreach (1 .. 2)
+   {
+      $pkt     = pack('CC n3 A*',
+                        ICMP_TYPE_ECHO,   # Type
+                        ICMP_CODE_ECHO,   # Code
+                        $chksum,          # Checksum
+                        $$,               # ID (pid)
+                        $seq,             # Sequence
+                        $data,            # Data
+                     );
+      
+      $chksum  = $self->_checksum($pkt) unless ($chksum);
+   }
+
+   send($self->{'_trace_socket'}, $pkt, 0, $saddr);
+
+   return;
+}
+
+sub _send_udp_packet
+{
+   my $self          = shift;
+   my ($dport,$hop)  = @_;
+   
+   my $saddr         = $self->_connect($dport,$hop);
+   my $data          = 'a' x ($self->packetlen - UDP_DATA);
+
+   $self->_connect($dport,$hop);
+
+   send($self->{'_trace_socket'}, $data, 0);
+
+   return;
+}
+
+sub _connect
+{
+   my $self          = shift;
+   my ($port,$hop)   = @_;
+
+   my $socket_addr   = sockaddr_in($port,$self->{_destination});
+   
+   if ($self->protocol eq 'udp')
+   {
+      CORE::connect($self->{'_trace_socket'},$socket_addr);
+      $self->debug_print(2,"Connected to " . $self->host . "\n");
+   }
+
+   setsockopt($self->{'_trace_socket'}, IPPROTO_IP, IP_TTL, pack('C',$hop));
+   $self->debug_print(2,"Set TTL to $hop\n");
+
+   if ($self->protocol eq 'udp')
+   {
+      my $localaddr                    = getsockname($self->{'_trace_socket'});
+      my ($lport,undef)                = sockaddr_in($localaddr);
+      $self->{'_local_port'}           = $lport;
+   }
+
+   return ($self->protocol eq 'icmp') ? $socket_addr : undef;
+}
+
+# Lifted verbatum from Net::Ping 2.31
+# Description:  Do a checksum on the message.  Basically sum all of
+# the short words and fold the high order bits into the low order bits.
+
+sub _checksum
+{
+   my $self = shift;
+   my $msg = shift;
+
+   my (  $len_msg,       # Length of the message
+         $num_short,     # The number of short words in the message
+         $short,         # One short word
+         $chk            # The checksum
+      );
+
+   $len_msg    = length($msg);
+   $num_short  = int($len_msg / 2);
+   $chk        = 0;
+   foreach $short (unpack("n$num_short", $msg))
+   {
+      $chk += $short;
+   }                                           # Add the odd byte in
+   $chk += (unpack("C", substr($msg, $len_msg - 1, 1)) << 8) if $len_msg % 2;
+   $chk = ($chk >> 16) + ($chk & 0xffff);      # Fold high into low
+   return(~(($chk >> 16) + $chk) & 0xffff);    # Again and complement
 }
 
 1;
