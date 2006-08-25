@@ -5,12 +5,14 @@ use strict;
 use warnings;
 use Net::Traceroute;
 use Socket;
-use Carp qw(carp croak);
 use FileHandle;
+use Carp qw(carp croak);
 use Time::HiRes qw(time);
 
 @ISA = qw(Net::Traceroute);
-$VERSION = '0.10_01';
+$VERSION = '0.10_02';
+
+# Constants from header files or RFCs
 
 use constant SO_BINDTODEVICE        => 25;   # from asm/socket.h
 use constant IPPROTO_IP             => 0;    # from netinet/in.h
@@ -44,6 +46,9 @@ use constant ICMP_TYPE_ECHOREPLY    => 0;    # ICMP Type
 
 use constant ICMP_CODE_ECHO         => 0;    # ICMP Echo has no code
 
+# Perl 5.8.6 under Windows has a bug in the socket code, this env variable
+# works around the bug. It may effect other versions as well, and they should
+# be added here
 BEGIN
 {
    if ($^O eq "MSWin32" and $^V eq v5.8.6)
@@ -52,6 +57,7 @@ BEGIN
    }
 }
 
+# The list of currently accepted protocols
 %protocols = 
 (
                'icmp'      => 1,
@@ -69,14 +75,16 @@ my @icmp_unreach_code =
 );
 
 # set up allowed autoload attributes we need
-my @net_traceroute_native_vars = qw(use_alarm concurrent_hops
-      protocol first_hop device);
+my @net_traceroute_native_vars = qw(use_alarm concurrent_hops protocol 
+      first_hop device);
 
-for my $attr ( @net_traceroute_native_vars )
-{
-   $net_traceroute_native_var{$attr}++; 
-}
+@net_traceroute_native_var{@net_traceroute_native_vars} = ();
 
+# Methods
+
+# AUTOLOAD (perl internal)
+# Used to create the methods for the object dynamically from 
+# net_traceroute_naive_vars.
 sub AUTOLOAD 
 {
    my $self = shift;
@@ -84,11 +92,16 @@ sub AUTOLOAD
    $attr =~ s/.*:://;
    return unless $attr =~ /[^A-Z]/;  # skip DESTROY and all-cap methods
    carp "invalid attribute method: ->$attr()" 
-      unless $net_traceroute_native_var{$attr};
+      unless exists $net_traceroute_native_var{$attr};
    $self->{$attr} = shift if @_;
    return $self->{$attr};
 }
 
+# new (public method)
+# Creates a new blessed object of type Net::Traceroute::PurePerl.
+# Accepts many options as arguments, and initilizes the new object with
+# their values.
+# Croaks on bad arguments.
 sub new 
 {
    my $self = shift;
@@ -106,8 +119,11 @@ sub new
    # Old method to use ICMP for traceroutes, using `protocol' is preferred
    my $useicmp = delete $arg{'useicmp'};
 
-   # call the real traceroute new
-   $self->init(%arg);
+   $self->debug_print(1, 
+      "The useicmp parameter is depreciated, use `protocol'\n") if ($useicmp);
+
+   # Initialize blessed hash with passed arguments
+   $self->_init(%arg);
 
    # Set protocol to ICMP if useicmp was set;
    if ($useicmp)
@@ -117,7 +133,7 @@ sub new
       $self->protocol('icmp') if ($useicmp);
    }
 
-   # put our host back in
+   # put our host back in and set defaults for undefined options
    $self->host($host)	      if (defined $host);
    $self->max_ttl(30)		   unless (defined $self->max_ttl); 
    $self->queries(3)		      unless (defined $self->queries);
@@ -128,18 +144,21 @@ sub new
    $self->concurrent_hops(6)  unless (defined $self->concurrent_hops);
    
    # UDP is the UNIX default for traceroute
-   $self->protocol('udp')  unless (defined $self->protocol);
+   $self->protocol('udp')     unless (defined $self->protocol);
 
    # Depreciated: we no longer use libpcap, so the alarm is no longer
    # required. Kept for backwards compatibility but not used.
-   $self->use_alarm(0)		unless (defined $self->use_alarm); 
+   $self->use_alarm(0)		   unless (defined $self->use_alarm); 
 
+   # Validates all of the parameters.
    $self->_validate();
    
    return $self;
 }
 
-sub init
+# _init (private initialization method)
+# Overrides Net::Traceroutes init to set PurePerl specific parameters.
+sub _init
 {
    my $self = shift;
    my %arg  = @_;
@@ -154,9 +173,16 @@ sub init
    $self->SUPER::init(@_);
 }
 
+# pretty_print (public method)
+# The output of pretty_print tries to match the output of traceroute(1) as 
+# close as possible, with two excpetions. First, I cleaned up the columns to
+# make it easier to read, and second, I start a new line if the host IP changes
+# instead of printing the new IP inline. The first column stays the same hop 
+# number, only the host changes.
 sub pretty_print 
 {
-   my $self = shift;
+   my $self    = shift;
+   my $resolve = shift;
 
    print "traceroute to " . $self->host;
    print " (" . inet_ntoa($self->{'_destination'}) . "), ";
@@ -178,6 +204,11 @@ sub pretty_print
 
       for (my $query=1; $query <= $self->hop_queries($hop); $query++) {
          my $host = $self->hop_query_host($hop,$query);
+         if ($host and $resolve)
+         {
+            my $ip = $host;
+            $host = (gethostbyaddr(inet_aton($ip),AF_INET))[0] || $ip;
+         }
          if ($host and ( not $lasthost or $host ne $lasthost ))
          {
             printf "\n%2s ", $hop if ($lasthost and $host ne $lasthost);
@@ -201,15 +232,22 @@ sub pretty_print
    return;
 }
 
+# traceroute (public method)
+# Starts a new traceroute. This is a blocking call and it will either croak on
+# error, or return 0 if the host wasn't reached, or 1 if it was.
 sub traceroute 
 {
    my $self = shift;
 
+   # Revalidate parameters incase they were changed by calling $t->parameter()
+   # since the object was created.
    $self->_validate();
 
-   $self->debug_print(1, "Performing traceroute\n");
    carp "No host provided!" && return undef unless (defined $self->host);
+   
+   $self->debug_print(1, "Performing traceroute\n");
 
+   # Lookup the destination IP inside of a local scope
    {
       my $destination = inet_aton($self->host);
       
@@ -236,36 +274,16 @@ sub traceroute
    $self->{'_icmp_socket'}    = $icmpsocket;
    $self->{'_trace_socket'}   = $self->_create_tracert_socket();
 
+   # _run_traceroute is the event loop that actually does the work.
    my $success = $self->_run_traceroute();
 
    return $success;
 }
 
-# convert the addr returned by RawIP into human readable name or ip
-sub addr2name 
-{
-   my $addr = shift;
-   my $name  = (gethostbyaddr( pack("N",$addr), AF_INET) )[0] || addr2dot($addr);
-   return $name;
-}
+# Private methods
 
-sub rtt_time 
-{
-   my $ms = shift;
-   return sprintf("%.2f", 1000 * $ms);
-}
-
-sub dest_unreachable 
-{ 
-   my $type = shift;
-   my $code = shift;
-
-   return ( $type != 3 || ($type == 3 && $code == 3) );
-}
-
-
-# Private functions
-
+# _validate (private method)
+# Normalizes and validates all parameters, croaks on error
 sub _validate
 {
    my $self = shift;
@@ -311,22 +329,27 @@ sub _validate
    return;
 }
 
+# _run_traceroute (private method)
+# The heart of the traceroute method. Sends out packets with incrementing
+# ttls per hop. Recieves responses, validates them, and updates the hops
+# hash with the time and host. Processes timeouts and returns when the host
+# is reached, or the last packet on the last hop sent has been received
+# or has timed out. Returns 1 if the host was reached, or 0.
 sub _run_traceroute
 {
    my $self = shift;
 
-   my (  $end,
-         $endhop,
-         $stop,
-         $sentpackets,
-         $currenthop,
-         $currentquery,
-         $nexttimeout,
-         $timeout,
-         $rbits,
-         $nfound,
-         %packets,
-         %pktids,
+   my (  $end,          # Counter for endhop to wait until all queries return
+         $endhop,       # The hop that the host was reached on
+         $stop,         # Tells the main loop to exit
+         $sentpackets,  # Number of packets sent
+         $currenthop,   # Current hop
+         $currentquery, # Current query within the hop
+         $nexttimeout,  # Next time a packet will timeout
+         $rbits,        # select() bits
+         $nfound,       # Number of ready sockets from select()
+         %packets,      # Hash of packets sent but without a response
+         %pktids,       # Hash of packet port or seq numbers to packet ids
       );
 
    $stop = $end = $endhop = $sentpackets = 0;
@@ -342,11 +365,20 @@ sub _run_traceroute
 
    while (not $stop)
    {
+      # Reset the variable
+      $nfound = 0;
+
+      # Send packets so long as there are packets to send, there is less than
+      # conncurrent_hops packets currently outstanding, there is no packets
+      # waiting to be read on the socket and we haven't reached the host yet.
       while (scalar keys %packets < $self->concurrent_hops and 
             $currenthop <= $self->max_ttl and
-            not select((my $rout = $rbits),undef,undef,0))
+            (not $endhop or $currenthop <= $endhop) and
+            not $nfound = select((my $rout = $rbits),undef,undef,0))
       {
+         # sentpackets is used as an uid in the %packets hash.
          $sentpackets++;
+
          $self->debug_print(1,"Sending packet $currenthop $currentquery\n");
          my $start_time = $self->_send_packet($currenthop,$currentquery);
          my $id         = $self->{'_last_id'};
@@ -367,33 +399,39 @@ sub _run_traceroute
          $nexttimeout = $packets{$sentpackets}{'timeout'} 
             unless ($nexttimeout);
 
+         # Current query and current hop increments
          $currentquery = ($currentquery + 1) % $self->queries;
          if ($currentquery == 0)
          {
             $currenthop++;
          }
       }
-      $timeout = 0;
-      if (keys %packets == $self->concurrent_hops)
+
+      # If $nfound is nonzero than data is waiting to be read, no need to
+      # call select again.
+      if (not $nfound) # No data waiting to be read yet
       {
-         $timeout = $nexttimeout - time;
-         $timeout = .01 if ($timeout > .1);
+         # This sets the timeout for select to no more than .1 seconds
+         my $timeout = $nexttimeout - time;
+         $timeout    = .1 if ($timeout > .1);
+         $nfound     = select((my $rout = $rbits),undef,undef,$timeout);
       }
-      $nfound  = select((my $rout = $rbits),undef,undef,$timeout);
+
+      # While data is waiting to be read, read it.
       while ($nfound and keys %packets)
       {
-         my (  $recv_msg,
-               $from_saddr,
-               $from_port,
-               $from_ip,
-               $from_id,
-               $from_proto,
-               $from_type,
-               $from_code,
-               $icmp_data,
-               $local_port,
-               $end_time,
-               $last_hop,
+         my (  $recv_msg,     # The packet read by recv()
+               $from_saddr,   # The saddr returned by recv()
+               $from_port,    # The port the packet came from
+               $from_ip,      # The IP the packet came from
+               $from_id,      # The dport / seq of the received packet
+               $from_proto,   # The protocol of the packet
+               $from_type,    # The ICMP type of the packet
+               $from_code,    # The ICMP code of the packet
+               $icmp_data,    # The data portion of the ICMP packet
+               $local_port,   # The local port the packet is a reply to
+               $end_time,     # The time the packet arrived
+               $last_hop,     # Set to 1 if this packet came from the host
             );
 
          $end_time   = time;
@@ -418,7 +456,7 @@ sub _run_traceroute
          {
             my $protoname = getprotobynumber($from_proto);
             $self->debug_print(1,"Packet not ICMP $from_proto($protoname)\n");
-            last;
+            next;
          }
 
          ($from_type,$from_code) = unpack('CC',substr($recv_msg,ICMP_TYPE,2));
@@ -428,9 +466,12 @@ sub _run_traceroute
          {
             $self->debug_print(1,
                   "No data in packet ($from_type,$from_code)\n");
-            last;
+            next;
          }
 
+# TODO This code does not decode ICMP codes, only ICMP types, which can lead
+# to false results if a router sends, for instance, a Network Unreachable 
+# or Fragmentation Needed packet.
          if (  $from_type == ICMP_TYPE_TIMEEXCEED or
                $from_type == ICMP_TYPE_UNREACHABLE or
                ($self->protocol eq "icmp" and 
@@ -439,45 +480,59 @@ sub _run_traceroute
 
             if ($self->protocol eq 'udp')
             {
+               # The local port is used to verify the packet was sent from
+               # This process.
                $local_port    = unpack('n',substr($icmp_data,UDP_SPORT,2));
+
+               # The ID for UDP is the destination port number of the packet
                $from_id       = unpack('n',substr($icmp_data,UDP_DPORT,2));
 
+               # The target system will send ICMP port unreachable, routers
+               # along the path will send ICMP Time Exceeded messages.
                $last_hop      = ($from_type == ICMP_TYPE_UNREACHABLE) ? 1 : 0;
             }
             elsif ($self->protocol eq 'icmp')
             {
                if ($from_type == ICMP_TYPE_ECHOREPLY)
                {
+                  # The ICMP ID is used to verify the packet was sent from
+                  # this process.
                   my $icmp_id = unpack('n',substr($recv_msg,ICMP_ID,2));
-                  last unless ($icmp_id == $$);
+                  next unless ($icmp_id == $$);
 
                   my $seq     = unpack('n',substr($recv_msg,ICMP_SEQ,2));
-                  $from_id    = $seq; # Reusing the same variable name
+                  $from_id    = $seq; # The ID for ICMP is the seq number
                   $last_hop   = 1;;
-
-                  $self->debug_print(1,"Got echo reply\n");
                }
                else
                {
+                  # The ICMP ID is used to verify the packet was sent from
+                  # this process.
                   my $icmp_id = unpack('n',substr($icmp_data,ICMP_ID,2));
-                  return unless ($icmp_id == $$);
+                  next unless ($icmp_id == $$);
 
                   my $ptype   = unpack('C',substr($icmp_data,ICMP_TYPE,1));
                   my $pseq    = unpack('n',substr($icmp_data,ICMP_SEQ,2));
                   if ($ptype eq ICMP_TYPE_ECHO)
                   {
-                     $from_id = $pseq; # Reusing the variable
+                     $from_id = $pseq; # The ID for ICMP is the seq number
                   }
                }
             }
          }
 
+         # If we got and decoded the packet to get an ID, process it.
          if ($from_ip and $from_id)
          {
             my $id = $pktids{$from_id};
+            if (not exists $packets{$id})
+            {
+               $self->debug_print(1,"Packet $id received after ID deleted");
+               last;
+            }
             if ($packets{$id}{'id'} == $from_id)
             {
-               last if ($self->protocol eq 'udp' and 
+               next if ($self->protocol eq 'udp' and 
                      $packets{$id}{'localport'} != $local_port);
 
                my $total_time = $end_time - $packets{$id}{'starttime'};
@@ -486,51 +541,63 @@ sub _run_traceroute
 
                if (not $endhop or $hop <= $endhop)
                {
-
-                  if ($last_hop)
-                  {
-                     $end++;
-                     $endhop = $hop;
-                  }
-
                   $self->debug_print(1,"Recieved response for $hop $query\n");
                   $self->_add_hop_query($hop, $query+1, TRACEROUTE_OK, 
-                        $from_ip, rtt_time($total_time) );
+                        $from_ip, sprintf("%.2f", 1000 * $total_time) );
+
+                  # Sometimes a route will change and last_hop won't be set
+                  # causing the traceroute to hang. Therefore if hop = endhop
+                  # we set $end to the number of query responses for the
+                  # hop recieved so far.
+
+                  if ($last_hop or ($endhop and $hop == $endhop))
+                  {
+                     $end     = $self->hop_queries($hop);
+                     $endhop  = $hop;
+                  }
                }
+
+               # No longer waiting for this packet
                delete $packets{$id};
             }
          }
+         # Check if more data is waiting to be read, if so keep reading
          $nfound  = select((my $rout = $rbits),undef,undef,0);
       }
+
+      # Process timed out packets
       if (keys %packets and $nexttimeout < time)
       {
          undef $nexttimeout;
          
          foreach my $id (sort keys %packets)
          {
+            my $hop        = $packets{$id}{'hop'};
+         
             if ($packets{$id}{'timeout'} < time)
             {
-               my $hop        = $packets{$id}{'hop'};
                my $query      = $packets{$id}{'query'};
-
-               if ($endhop and $hop == $endhop)
-               {
-                  $end++;
-               }
-               elsif ($endhop and $hop > $endhop)
-               {
-                  delete $packets{$id};
-                  next;
-               }
 
                $self->debug_print(1,"Timeout for $hop $query\n");
 	            $self->_add_hop_query($hop, $query+1, TRACEROUTE_TIMEOUT, 
                      "", 0 );
+
+               if ($endhop and $hop == $endhop)
+               {
+                  # Sometimes a route will change and last_hop won't be set
+                  # causing the traceroute to hang. Therefore if hop = endhop
+                  # we set $end to the number of query responses for the
+                  # hop recieved so far.
+
+                  $end = $self->hop_queries($hop);
+               }
                
+               # No longer waiting for this packet
                delete $packets{$id};
             }
             elsif (not defined $nexttimeout)
             {
+               # Reset next timeout to the next packet
                $nexttimeout = $packets{$id}{'timeout'};
                last;
             }
@@ -540,14 +607,27 @@ sub _run_traceroute
       # Check if it is time to stop the looping
       if ($currenthop > $self->max_ttl and not keys %packets)
       {
-         $self->debug_print(1,"No more packets, last hop\n");
+         $self->debug_print(1,"No more packets, reached max_ttl\n");
          $stop = 1;
       }
-      elsif ($end == $self->queries)
+      elsif ($end >= $self->queries)
       {
-         $self->debug_print(1,"Reached last hop\n");
-         $end  = 1;
-         $stop = 1;
+         # Delete packets for hops after $endhop
+         foreach my $id (sort keys %packets)
+         {
+            my $hop        = $packets{$id}{'hop'};
+            if (not $hop or ( $endhop and $hop > $endhop) )
+            {
+               # No longer care about this packet
+               delete $packets{$id};
+            }
+         }
+         if (not keys %packets)
+         {
+            $self->debug_print(1,"Reached host on $endhop hop\n");
+            $end  = 1;
+            $stop = 1;
+         }
       }
 
       # Looping
@@ -556,11 +636,10 @@ sub _run_traceroute
    return $end;
 }
 
-# _create_tracert_socket reuses the ICMP socket already created for
-# icmp traceroutes, or creates a new socket. It then binds the socket
-# to the user defined devices and source address if provided and returns
-# the created socket.
-
+# _create_tracert_socket (private method)
+# Reuses the ICMP socket already created for icmp traceroutes, or creates a 
+# new socket. It then binds the socket to the user defined device and/or 
+# source address if provided and returns the created socket.
 sub _create_tracert_socket
 {
    my $self = shift;
@@ -582,11 +661,11 @@ sub _create_tracert_socket
 
    if ($self->device)
    {
-      setsockopt($socket, SOL_SOCKET, SO_BINDTODEVICE(), 
+      setsockopt($socket, SOL_SOCKET, SO_BINDTODEVICE, 
          pack('Z*', $self->device)) or 
             croak "error binding to ". $self->device ." - $!";
 
-      $self->debug_print(2,"Bound socket to " . $self->device . "\n");
+      $self->debug_print(2,"Bound socket to ". $self->device ."\n");
    }
 
    if ($self->source_address and $self->source_address ne '0.0.0.0')
@@ -597,9 +676,8 @@ sub _create_tracert_socket
    return $socket;
 }
 
-# _bind binds a sockets to a local source address so all packets originate
-# from that IP.
-
+# _bind (private method)
+# binds a sockets to a local address so all packets originate from that IP.
 sub _bind
 {
    my $self    = shift;
@@ -618,6 +696,9 @@ sub _bind
    return;
 }
 
+# _send_packet (private method)
+# Sends the packet for $hop, $query to the destination. Actually calls 
+# submethods for the different protocols which create and send the packet.
 sub _send_packet
 {
    my $self          = shift;
@@ -625,12 +706,14 @@ sub _send_packet
 
    if ($self->protocol eq "icmp")
    {
+      # Sequence ID for the ICMP echo request
       my $seq = ($hop-1) * $self->queries + $query + 1;
       $self->_send_icmp_packet($seq,$hop);
       $self->{'_last_id'} = $seq;
    }
    elsif ($self->protocol eq "udp")
    {
+      # Destination port for the UDP packet
       my $dport = $self->base_port + ($hop-1) * $self->queries + $query;
       $self->_send_udp_packet($dport,$hop);
       $self->{'_last_id'} = $dport;
@@ -639,11 +722,15 @@ sub _send_packet
    return time;
 }
 
+# _send_icmp_packet (private method)
+# Sends an ICMP packet with the given sequence number. The PID is used as
+# the packet ID and $seq is the sequence number.
 sub _send_icmp_packet
 {
    my $self             = shift;
    my ($seq,$hop)       = @_;
    
+   # Set TTL of socket to $hop.
    my $saddr            = $self->_connect(ICMP_PORT,$hop);
    my $data             = 'a' x ($self->packetlen - ICMP_DATA);
 
@@ -669,11 +756,14 @@ sub _send_icmp_packet
    return;
 }
 
+# _send_udp_packet (private method)
+# Sends a udp packet to the given destination port.
 sub _send_udp_packet
 {
    my $self          = shift;
    my ($dport,$hop)  = @_;
    
+   # Connect socket to destination port and set TTL
    my $saddr         = $self->_connect($dport,$hop);
    my $data          = 'a' x ($self->packetlen - UDP_DATA);
 
@@ -684,6 +774,8 @@ sub _send_udp_packet
    return;
 }
 
+# _connect (private method)
+# Connects the socket unless the protocol is ICMP and sets the TTL.
 sub _connect
 {
    my $self          = shift;
@@ -710,10 +802,10 @@ sub _connect
    return ($self->protocol eq 'icmp') ? $socket_addr : undef;
 }
 
+# _checksum (private method)
 # Lifted verbatum from Net::Ping 2.31
 # Description:  Do a checksum on the message.  Basically sum all of
 # the short words and fold the high order bits into the low order bits.
-
 sub _checksum
 {
    my $self = shift;

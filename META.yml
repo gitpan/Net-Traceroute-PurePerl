@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:                Net-Traceroute-PurePerl
-version:             0.10_01
+version:             0.10_02
 abstract:            traceroute(1) functionality in perl via raw sockets
 license:             unknown
 generated_by:        ExtUtils::MakeMaker version 6.30_01

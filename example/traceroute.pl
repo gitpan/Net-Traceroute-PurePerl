@@ -15,7 +15,7 @@ use Net::Traceroute::PurePerl;
 use Getopt::Long;
 
 use vars qw($opt_V $opt_h $opt_f $opt_p $opt_m $opt_w $opt_q $opt_S $opt_i
-      $opt_l $opt_I $opt_D $opt_N $host $VERSION);
+      $opt_l $opt_I $opt_D $opt_N $opt_n $host $VERSION);
 
 $VERSION="1.0";
 
@@ -36,6 +36,7 @@ GetOptions
        "l=i"   => \$opt_l, "packetlen=i"  => \$opt_l,
        "N=i"   => \$opt_N, "concurrent=i" => \$opt_N,
        "I"     => \$opt_I, "icmp"         => \$opt_I,
+       "n"     => \$opt_n,
    );
        
 if ($opt_V) {
@@ -60,7 +61,8 @@ my $packetlen     = $opt_l || 128;
 my $useicmp       = $opt_I || 0;
 my $concurrent    = $opt_N || 6;
 
-my $protocol      = ($useicmp) ? 'icmp' : 'udp';
+my $resolve       = ($opt_n)     ? 0      : 1;
+my $protocol      = ($useicmp)   ? 'icmp' : 'udp';
 
 $host             = $ARGV[0];
 
@@ -86,7 +88,7 @@ my $t = Net::Traceroute::PurePerl->new(
 );
       
 $t->traceroute();
-$t->pretty_print();
+$t->pretty_print($resolve);
 
 sub usage
 {
@@ -99,6 +101,7 @@ sub usage
       print "\n",
             "  -h, --help        display this help and exit\n",
             "  -V, --version     display the version and exit\n",
+            "  -n                don't resolve router IPs to host names\n",
             "  -I, --icmp        use ICMP instead of UDP\n",
             "  -f, --firsthop    set the first hop TTL\n",
             "  -m, --maxttl      set the maximum TTL before stopping\n",
