@@ -44,48 +44,61 @@ ok(
 if ($t)
 {
 
-my $success;
+   my $success;
+   eval {   local $SIG{ALRM} = sub { die "alarm" }; 
+            alarm 30; # Should never take longer than 24 seconds 
+            $success = $t->traceroute;
+            alarm 0;
+   };
 
-eval {$success = $t->traceroute};
+   ok(
+         defined $success,
+         'Traceroute completed successfully'
+   ) or diag($@);
 
-ok(
-      defined $success,
-      'Traceroute completed successfully'
-);
+   my $success2;
+   eval {   $t->protocol('icmp');
+            local $SIG{ALRM} = sub { die "alarm timed out" }; 
+            alarm 30; # Should never take longer than 24 seconds 
+            $success2 = $t->traceroute;
+            alarm 0;
+   };
 
-$t->protocol('icmp');
+   ok(
+         defined $success2,
+         'ICMP Traceroute completed successfully'
+   ) or diag($@);
+}
+else
+{
+   foreach (1 .. 2)
+   {
+      fail('Could not create trace object');
+   }
+   eval { $t = Net::Traceroute::PurePerl->new() };
+}
 
-my $success2;
-
-eval {$success2 = $t->traceroute};
-
-ok(
-      defined $success2,
-      'ICMP Traceroute completed successfully'
-);
-
-$t->protocol('notimplemented');
-eval {$t->traceroute};
+eval { $t->protocol('notimplemented'); $t->traceroute; };
 
 ok(
       $@ =~ /Parameter `protocol\'/,
       "Bad protocol detected successfully"
 );
 
-$t->protocol('icmp');
-$t->host('badhost.x');
-eval {$t->traceroute};
+eval { $t->protocol('icmp'); $t->host('badhost.x'); $t->traceroute; };
 
 ok(
       $@ =~ /Could not resolve host/,
       "Bad host detected successfully"
 );
-}
-else
-{
-   foreach (1 .. 4)
-   {
-      fail('Could not create trace object');
-   }
-}
+
+# The clone method currently fails
+
+# my $t2;
+# eval { 
+#    $t = Net::Traceroute::PurePerl->new(host => 'www.perl.org', queries=>'2'); 
+#    $t2 = $t->clone(); 
+# };
+
+# is_deeply($t, $t2, "Clone works") or diag ("Clone failed");
 

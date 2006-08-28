@@ -1,5 +1,11 @@
 Revision history for Perl module Net::Traceroute::PurePerl.
 
+0.10    Sun Aug 27 21:08:00 MST 206 (ahoying)
+    - Official .10 release
+    - Fixed more bugs in the core traceroute code.
+    - Updated the POD with documentation for the changes since 0.02
+    - Updated readme with changes to the POD
+
 0.10_02 Fri Aug 25 17:02:00 MST 2006 (ahoying)
 	- Rewrote traceroute core to not use Net::RawIP but instead do all the
 		heavy lifting internal to this module.

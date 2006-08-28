@@ -10,7 +10,7 @@ use Carp qw(carp croak);
 use Time::HiRes qw(time);
 
 @ISA = qw(Net::Traceroute);
-$VERSION = '0.10_02';
+$VERSION = '0.10';
 
 # Constants from header files or RFCs
 
@@ -65,13 +65,13 @@ BEGIN
 );
 
 my @icmp_unreach_code = 
-(		
+(     
                TRACEROUTE_UNREACH_NET,
-					TRACEROUTE_UNREACH_HOST,
-					TRACEROUTE_UNREACH_PROTO,
-					0,
-					TRACEROUTE_UNREACH_NEEDFRAG,
-					TRACEROUTE_UNREACH_SRCFAIL, 
+               TRACEROUTE_UNREACH_HOST,
+               TRACEROUTE_UNREACH_PROTO,
+               0,
+               TRACEROUTE_UNREACH_NEEDFRAG,
+               TRACEROUTE_UNREACH_SRCFAIL, 
 );
 
 # set up allowed autoload attributes we need
@@ -134,12 +134,12 @@ sub new
    }
 
    # put our host back in and set defaults for undefined options
-   $self->host($host)	      if (defined $host);
-   $self->max_ttl(30)		   unless (defined $self->max_ttl); 
-   $self->queries(3)		      unless (defined $self->queries);
-   $self->base_port(33434)	   unless (defined $self->base_port); 
-   $self->query_timeout(5)	   unless (defined $self->query_timeout); 
-   $self->packetlen(40)		   unless (defined $self->packetlen); 
+   $self->host($host)         if (defined $host);
+   $self->max_ttl(30)         unless (defined $self->max_ttl); 
+   $self->queries(3)          unless (defined $self->queries);
+   $self->base_port(33434)    unless (defined $self->base_port); 
+   $self->query_timeout(5)    unless (defined $self->query_timeout); 
+   $self->packetlen(40)       unless (defined $self->packetlen); 
    $self->first_hop(1)        unless (defined $self->first_hop);
    $self->concurrent_hops(6)  unless (defined $self->concurrent_hops);
    
@@ -148,7 +148,7 @@ sub new
 
    # Depreciated: we no longer use libpcap, so the alarm is no longer
    # required. Kept for backwards compatibility but not used.
-   $self->use_alarm(0)		   unless (defined $self->use_alarm); 
+   $self->use_alarm(0)        unless (defined $self->use_alarm); 
 
    # Validates all of the parameters.
    $self->_validate();
@@ -194,7 +194,7 @@ sub pretty_print
    {
       my $lasthost = '';
 
-	   printf '%2s ', $hop;
+      printf '%2s ', $hop;
 
       if (not $self->hop_queries($hop))
       {
@@ -224,7 +224,7 @@ sub pretty_print
          {
             print "* ";
          }
-	   }
+      }
 
       print "\n";
    }
@@ -325,6 +325,9 @@ sub _validate
    
    croak "parameter `concurrent_hops' must be an interger between 1 and 255"
       if ($self->concurrent_hops < 1 or $self->concurrent_hops > 255);
+
+   croak "protocol " . $self->protocol . " not supported under Windows"
+      if ($self->protocol ne 'icmp' and $^O eq 'MSWin32');
 
    return;
 }
@@ -456,7 +459,7 @@ sub _run_traceroute
          {
             my $protoname = getprotobynumber($from_proto);
             $self->debug_print(1,"Packet not ICMP $from_proto($protoname)\n");
-            next;
+            last;
          }
 
          ($from_type,$from_code) = unpack('CC',substr($recv_msg,ICMP_TYPE,2));
@@ -466,7 +469,7 @@ sub _run_traceroute
          {
             $self->debug_print(1,
                   "No data in packet ($from_type,$from_code)\n");
-            next;
+            last;
          }
 
 # TODO This code does not decode ICMP codes, only ICMP types, which can lead
@@ -498,7 +501,7 @@ sub _run_traceroute
                   # The ICMP ID is used to verify the packet was sent from
                   # this process.
                   my $icmp_id = unpack('n',substr($recv_msg,ICMP_ID,2));
-                  next unless ($icmp_id == $$);
+                  last unless ($icmp_id == $$);
 
                   my $seq     = unpack('n',substr($recv_msg,ICMP_SEQ,2));
                   $from_id    = $seq; # The ID for ICMP is the seq number
@@ -509,7 +512,7 @@ sub _run_traceroute
                   # The ICMP ID is used to verify the packet was sent from
                   # this process.
                   my $icmp_id = unpack('n',substr($icmp_data,ICMP_ID,2));
-                  next unless ($icmp_id == $$);
+                  last unless ($icmp_id == $$);
 
                   my $ptype   = unpack('C',substr($icmp_data,ICMP_TYPE,1));
                   my $pseq    = unpack('n',substr($icmp_data,ICMP_SEQ,2));
@@ -525,6 +528,11 @@ sub _run_traceroute
          if ($from_ip and $from_id)
          {
             my $id = $pktids{$from_id};
+            if (not $id)
+            {
+               $self->debug_print(1,"No packet sent matches the reply\n");
+               last;
+            }
             if (not exists $packets{$id})
             {
                $self->debug_print(1,"Packet $id received after ID deleted");
@@ -532,7 +540,7 @@ sub _run_traceroute
             }
             if ($packets{$id}{'id'} == $from_id)
             {
-               next if ($self->protocol eq 'udp' and 
+               last if ($self->protocol eq 'udp' and 
                      $packets{$id}{'localport'} != $local_port);
 
                my $total_time = $end_time - $packets{$id}{'starttime'};
@@ -579,7 +587,7 @@ sub _run_traceroute
                my $query      = $packets{$id}{'query'};
 
                $self->debug_print(1,"Timeout for $hop $query\n");
-	            $self->_add_hop_query($hop, $query+1, TRACEROUTE_TIMEOUT, 
+               $self->_add_hop_query($hop, $query+1, TRACEROUTE_TIMEOUT, 
                      "", 0 );
 
                if ($endhop and $hop == $endhop)
@@ -832,23 +840,28 @@ sub _checksum
 1;
 
 __END__
+
 =head1 NAME
 
 Net::Traceroute:PurePerl - traceroute(1) functionality in perl via raw sockets
+
+=head1 VERSION
+
+This document describes version 0.10 of Net::Traceroute::PurePerl.
 
 =head1 SYNOPSIS
 
     use Net::Traceroute::PurePerl;
 
     my $t = new Net::Traceroute::PurePerl(
-				backend => 'PurePerl', # this optional
-				host    => 'www.openreach.com',
-				debug   => 0,
-				max_ttl => 12,
-				timeout => 2,
-				packetlen => 40,
-				use_alarm => 1,
-				);
+         backend        => 'PurePerl', # this optional
+         host           => 'www.openreach.com',
+         debug          => 0,
+         max_ttl        => 12,
+         query_timeout  => 2,
+         packetlen      => 40,
+         protocol       => 'udp', # Or icmp
+    );
     $t->traceroute;
     $t->pretty_print;
 
@@ -858,48 +871,105 @@ Net::Traceroute:PurePerl - traceroute(1) functionality in perl via raw sockets
 This module implements traceroute(1) functionality for perl5.  
 It allows you to trace the path IP packets take to a destination.  
 It is implemented by using raw sockets to act just like the regular traceroute.
-You must have Net::RawIP installed. 
+
 You must also be root to use the raw sockets.
 
+=head1 INSTALLATION
+
+=head2 Basic Installation
+
+Net::Traceroute::PurePerl may be installed through the CPAN shell
+in the usual CPAN shell manner. This typically is:
+    
+   $ perl -MCPAN -e 'install Net::Traceroute::PurePerl'
+
+You can also read this README from the CPAN shell:
+
+   $ perl -MCPAN -e shell
+   cpan> readme Net::Traceroute::PurePerl
+
+And you can install the module from the CPAN prompt as well:
+
+   cpan> install Net::Traceroute::PurePerl
+
+=head2 Manual Installation
+
+Net::Traceroute::PurePerl can also be installed manually.
+L<ftp://ftp-mirror.internap.com/pub/CPAN/authors/id/A/AH/AHOYING/> or a 
+similarly named directory at your favorite CPAN mirror should hold the 
+latest version.
+
+Downloading and unpacking the distribution are left up to the reader.
+
+To build and test it:
+
+   perl Makefile.PL
+   make
+   make test
+
+The test program, t/01_trace.t, makes an excellent sample program. It was
+adapted from the code used to test and develop this module. There may be
+additional sample programs in the examples folder.
+
+When you are ready to install the module:
+
+   make install
+
+It should now be ready to use.
 
 =head1 OVERVIEW
 
 A new Net::Traceroute::PurePerl object must be created with the I<new> method.
 This will not perform the traceroute immediately, unlike Net::Traceroute.
-It will return a "template" object that can be used to set parameters for several subsequent traceroutes.
+It will return a "template" object that can be used to set parameters for 
+several subsequent traceroutes.
 
 Methods are available for accessing information about a given
 traceroute attempt.  There are also methods that view/modify the
 options that are passed to the object's constructor.
 
-To trace a route, UDP packets are sent with a small TTL (time-to-live)
+To trace a route, UDP or ICMP packets are sent with a small TTL (time-to-live)
 field in an attempt to get intervening routers to generate ICMP
 TIME_EXCEEDED messages.
 
-=head1 CONSTRUCTOR AND CLONING
+=head1 VERSION CHANGES
 
-    $obj = Net::Traceroute::PurePerl->new([base_port	=> $base_port,]
-				[debug		=> $debuglvl,]
-				[max_ttl	=> $max_ttl,]
-				[host		=> $host,]
-				[queries	=> $queries,]
-				[query_timeout	=> $query_timeout,]
-				[timeout	=> $timeout,]
-				[source_address	=> $srcaddr,]
-				[packetlen	=> $packetlen,]
-				[trace_program	=> $program,]
-				[no_fragment	=> $nofrag,]);
-				[use_alarm	=> $use_alarm,]);
-    $frob = $obj->clone([options]);
+This version of Net::Traceroute::PurePerl is a complete rewrite of the internal
+traceroute code used in the 0.02 release. As such a number of new capabilities
+have been introduced, and probably a number of bugs as well.
+
+The public methods have remained unchanged, and this should be a drop in
+replacement for the older version.
+
+This version no longer resolves router IPs to host names in the traceroute 
+code. If you need the IP resolved you have to do it from your code, or use
+the pretty_print method with a positive value passed as an argument.
+
+The current version does not correctly detect network unreachable and
+other nonstandard ICMP errors. This can lead to problems on networks where
+these errors are sent instead of a port unreachable or ttl exceeded packet.
+
+=head1 CONSTRUCTOR
+
+    $obj = Net::Traceroute::PurePerl->new(
+            [base_port        => $base_port,]
+            [debug            => $debuglvl,]
+            [max_ttl          => $max_ttl,]
+            [host             => $host,]
+            [queries          => $queries,]
+            [query_timeout    => $query_timeout,]
+            [source_address   => $srcaddr,]
+            [packetlen        => $packetlen,]
+            [concurrent_hops  => $concurrent,]
+            [first_hop        => $first_hop,]
+            [device           => $device,]
+            [protocol         => $protocol,]
+    );
+            
 
 This is the constructor for a new Net::Traceroute object.  
 If given C<host>, it will NOT actually perform the traceroute.  
 You MUST call the traceroute method later.
-
-Given an existing Net::Traceroute object $obj as a template, you can
-call $obj->clone() with the usual constructor parameters.  The same
-rules apply about defining host; that is, traceroute will be run if it
-is defined.  You can always pass host => undef to clone.
 
 Possible options are:
 
@@ -933,7 +1003,8 @@ unspecified.  C<Traceroute>'s C<-w> option.
 
 B<timeout> - unused here
 
-B<source_address> - Select the source address that traceroute wil use.
+B<source_address> - Select the source address that traceroute will use.
+C<Traceroute>'s C<-S> option.
 
 B<packetlen> - Length of packets to use.  Traceroute tries to make the
 IP packet exactly this long.
@@ -942,8 +1013,26 @@ B<trace_program> - unused here
 
 B<no_fragment> - unused at the moment
 
-B<use_alarm> - Used to make sure the queries timeout as needed.  
-If your trace seems to hang with this set to 0, set it to 1 and you should be good to go.
+B<use_alarm> - unused in this version
+
+B<protocol> - Either ICMP or UDP. ICMP uses ICMP echo packets with incrementing 
+sequence numbers, while UDP uses USP packets with incrementing ports. It 
+defaults to udp.
+
+B<concurrent_hops> - This is the maximum number of outstanding packets sent
+at one time. Setting this to a high number may overflow your socket receive
+buffer and slightly delay the processing of response packets, making the
+round trip time reported slightly higher, however it will significantly
+decrease the amount of time it takes to run a traceroute. Defaults to 6.
+ C<Traceroute>'s C<-N> option.
+
+B<first_hop> - This is the lowest TTL to use. Setting this will skip the
+first x routers in the path, especially useful if they never change. Defaults
+to 1.  C<Traceroute>'s C<-f> option.
+
+B<device> - The device to send the packet from. Normally this is determined
+by the system's routing table, but it can be overridden. It defaults to undef.
+ C<Traceroute>'s C<-I> option.
 
 =head1 METHODS
 
@@ -953,6 +1042,20 @@ If your trace seems to hang with this set to 0, set it to 1 and you should be go
 
 Run the traceroute.  
 Will fill in the rest of the object for informational queries.
+
+The traceroute method is a blocking call. It will not return until the max_ttl
+is reached or the host is reached. As such, if your program is time dependent
+the call should be wrapped in an eval with an ALARM set.
+
+  eval {
+    local $SIG{ALRM} = sub { die "alarm" };
+    alarm $timeout;
+    $success = $t->traceroute();
+    alarm 0;
+  }
+  warn "Traceroute timed out\n" if ($@ and $@ eq "alarm");
+
+Returns 1 if the host was reached, or 0 if it wasn't.
 
 =back
 
@@ -985,9 +1088,15 @@ aren't documented here.
 
 =item packetlen([LEN])
 
-=item trace_program([PROGRAM])
-
 =item use_alarm([0|1])
+
+=item protocl([PROTOCOL])
+
+=item concurrent_hops([CONCURRENT])
+
+=item first_hop([FIRST_HOP])
+
+=item device([DEVICE])
 
 =back
 
@@ -1004,7 +1113,15 @@ counting.
 
 =item pretty_print
 
-Prints to stdout a traceroute-like text.
+Prints to stdout a traceroute-like text. Tries to mimic traceroute(1)'s
+output as close as possible with a few exceptions.  First, the columns are
+easier to read, and second, a new line is started if the host IP changes
+instead of printing the new IP inline. The first column stays the same hop 
+number, only the host changes.
+
+Passing in an argument of 1 will make pretty_print resolve the names of the
+router ips, otherwise they are printed as raw ip addresses, like 
+C<Traceroute>'s C<-n> option.
 
 =item stat
 
@@ -1022,6 +1139,8 @@ Returns 1 if the host was found, undef otherwise.
 If your traceroute supports MTU discovery, this method will return the
 MTU in some circumstances.  You must set no_fragment, and must use a
 packetlen larger than the path mtu for this to be set.
+
+NOTE: This doesn't work with this version.
 
 =item hops
 
@@ -1107,33 +1226,67 @@ returned.
 
 =back
 
-=head1 CLONING SUPPORT 
-
-
-
-=head1 BUGS
+=head1 BUGS and LIMITATIONS
 
 I have not tested the cloning functions of Net::Traceroute::PurePerl.
 It ought to work, but if not, BUG me.
 
-This has not been tested on windows, so please let me know if it works there.
+This module requires root or administrative privileges to run. It opens a raw 
+socket to listen for TTL exceeded messages. Take appropriate precautions.
 
-You must have Net::RawIP, because I'm too lazy to re-invent the wheel.  
-As such, we have all the bugs that Net::RawIP has.
+Windows only supports ICMP traceroutes. This may change in a future release,
+but it is a real pain since Windows doesn't send ICMP error messages to 
+applications for other protocols unless the socket is in promiscous mode. :(
+
+The current version does not correctly detect network unreachable and
+other nonstandard ICMP errors. This can lead to problems on networks where
+these errors are sent instead of a port unreachable or ttl exceeded packet.
+
+The current version does not support Net::Traceroute's clone method.
+Calling clone will create an object that is unusable at this point.
+
+=head1 TODO
+
+=over 2
+
+=item *
+
+Implement IPv6 capability.
+
+=item *
+
+Implement TCP traceroute.
+
+=item *
+
+Fix bugs listed above.
+
+=back
 
 =head1 SEE ALSO
 
 traceroute(1)
 
+This module's traceroute code was heavily influenced by C<Net::Ping>.
+
+See the examples folder and the test programs for more examples of this module
+in action.
+
 =head1 AUTHOR
 
 Tom Scanlan <tscanlan@openreach.com> owner Net::Traceroute::PurePerl
+
+Andrew Hoying <ahoying@cpan.org> current co-maintainer of 
+Net::Traceroute::PurePerl. Any bugs in this release are mine, please send me
+the bug reports.
 
 Daniel Hagerty <hag@ai.mit.edu> owner of Net::Traceroute and input on this fella
 
 =head1 COPYRIGHT
 
-Go right ahead and copy it.  2002 Tom Scanlan.
+Go right ahead and copy it.  2002 Tom Scanlan. Copyright 2006 by Andrew Hoying.
 Don't blame me for damages, just the bugs.
+
+Net::Traceroute::PurePerl is free software; you may redistribute it and or modify it under the same terms as Perl itself.
 
 =cut
