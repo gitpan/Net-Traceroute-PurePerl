@@ -5,5 +5,5 @@ WriteMakefile(
     'PREREQ_PM'		=> { Net::Traceroute => 1.05 },
     ($] >= 5.005 ?      ## Add these new keywords supported since 5.005
       ('ABSTRACT_FROM'  => 'lib/Net/Traceroute/PurePerl.pm', # retrieve abstract from module
-       'AUTHOR'         => 'Tom Scanlan <tscanlan@openreach.com>, Andrew Hoying <ahoying@cpan.org>, John Kristoff <jtk@cpan.org>') : () ),
+       'AUTHOR'         => 'John Kristoff <jtk@cpan.org>, Andrew Hoying <ahoying@cpan.org>') : () ),
 );

@@ -1,5 +1,9 @@
 Revision history for Perl module Net::Traceroute::PurePerl.
 
+0.10_03 2012-01-23 (jtk)
+    - Bumped dev number to avoid conflict with ahoying's version scheme
+    - Retired Tom Scanlan from the current maintainer list
+
 0.10_01 2012-01-23 (jtk)
     - Developer test release
     - Renamed first_hop to first_ttl to match traceroute(1) syntax

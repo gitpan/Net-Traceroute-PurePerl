@@ -12,7 +12,7 @@ use Time::HiRes qw(time);
 use vars qw( @ISA $VERSION $AUTOLOAD %net_traceroute_native_var %protocols );
 
 @ISA     = qw(Net::Traceroute);
-$VERSION = '0.10_01';
+$VERSION = '0.10_03';
 
 # Constants from header files or RFCs
 use constant SO_BINDTODEVICE => 25;    # from asm/socket.h
