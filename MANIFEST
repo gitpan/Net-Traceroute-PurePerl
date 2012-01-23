@@ -1,7 +1,7 @@
 Changes
 Makefile.PL
 MANIFEST
-PurePerl.pm
+lib/Net/Traceroute/PurePerl.pm
 README
 t/01_trace.t
 example/simple.pl

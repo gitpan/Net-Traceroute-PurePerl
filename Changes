@@ -1,5 +1,12 @@
 Revision history for Perl module Net::Traceroute::PurePerl.
 
+0.10_01 2012-01-23 (jtk)
+    - Developer test release
+    - Renamed first_hop to first_ttl to match traceroute(1) syntax
+    - Fixed pretty print outer loop (#62941)
+    - Updated documentation and packaging
+    - Minor code cleaning
+
 0.10    Sun Aug 27 21:08:00 MST 206 (ahoying)
     - Official .10 release
     - Fixed more bugs in the core traceroute code.
