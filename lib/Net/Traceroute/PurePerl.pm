@@ -12,14 +12,14 @@ use Time::HiRes qw(time);
 use vars qw( @ISA $VERSION $AUTOLOAD %net_traceroute_native_var %protocols );
 
 @ISA     = qw(Net::Traceroute);
-$VERSION = '0.10_03';
+$VERSION = '0.10_04';
 
 # Constants from header files or RFCs
 use constant SO_BINDTODEVICE => 25;    # from asm/socket.h
 use constant IPPROTO_IP      => 0;     # from netinet/in.h
 
 # Windows winsock2 uses 4 for IP_TTL instead of 2
-use constant IP_TTL => ( $^O eq "MSWin32" ) ? 4 : 2;
+use constant SOCKOPT_IP_TTL => ( $^O eq "MSWin32" ) ? 4 : 2;
 
 use constant IP_HEADERS   => 20;       # Length of IP headers
 use constant ICMP_HEADERS => 8;        # Length of ICMP headers
@@ -764,7 +764,7 @@ sub _connect {
     }
 
     setsockopt( $self->{'_trace_socket'},
-        IPPROTO_IP, IP_TTL, pack( 'C', $hop ) );
+        IPPROTO_IP, SOCKOPT_IP_TTL, pack( 'C', $hop ) );
     $self->debug_print( 2, "Set TTL to $hop\n" );
 
     if ( $self->protocol eq 'udp' ) {

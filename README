@@ -1,6 +1,6 @@
-Net-Traceroute-PurePerl version 0.10_03
+Net-Traceroute-PurePerl version 0.10_04
 =======================================
-This is Net::Traceroute::PurePerl version 0.10_03, a Perl implementation
+This is Net::Traceroute::PurePerl version 0.10_04, a Perl implementation
 of traceroute(1) using raw sockets.
 
 INSTALLATION

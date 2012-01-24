@@ -1,10 +1,10 @@
 --- #YAML:1.0
 name:               Net-Traceroute-PurePerl
-version:            0.10_03
+version:            0.10_04
 abstract:           traceroute(1) implementation in Perl using raw sockets
 author:
     - John Kristoff <jtk@cpan.org>, Andrew Hoying <ahoying@cpan.org>
-license:            unknown
+license:            perl
 distribution_type:  module
 configure_requires:
     ExtUtils::MakeMaker:  0
